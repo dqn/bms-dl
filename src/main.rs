@@ -8,9 +8,11 @@ mod table;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::Result;
 use clap::Parser;
+use tokio::sync::Semaphore;
 
 use crate::cli::Args;
 use crate::download::{DownloadResult, DownloadTask};
@@ -31,6 +33,7 @@ async fn main() -> Result<()> {
 
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::limited(10))
+        .connect_timeout(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(300))
         .cookie_store(true)
         .build()?;
@@ -103,23 +106,35 @@ async fn main() -> Result<()> {
     tracing::info!("{} download tasks generated", tasks.len());
 
     // Phase 3-4: Download with concurrency control
+    let download_start = std::time::Instant::now();
     let results = download::execute_downloads(&client, tasks, args.jobs).await;
+    let download_duration = download_start.elapsed();
 
-    // Phase 5-6: Extract archives and normalize
+    // Phase 5-6: Extract archives and normalize (parallel)
     let mut success_count = 0u32;
     let mut skip_count = 0u32;
     let mut fail_count = 0u32;
     let mut failed_entries = Vec::new();
     let mut skipped_entries = Vec::new();
 
-    for result in &results {
+    let extract_parallelism = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let extract_semaphore = Arc::new(Semaphore::new(extract_parallelism));
+    let mut extract_handles = Vec::new();
+
+    for result in results {
         match result {
             DownloadResult::Success { path } => {
                 success_count += 1;
 
-                if let Err(e) = extract_and_normalize(path) {
-                    tracing::warn!("extraction failed for {}: {e}", path.display());
-                }
+                let permit = extract_semaphore.clone().acquire_owned().await.unwrap();
+                extract_handles.push(tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    if let Err(e) = extract_and_normalize(&path) {
+                        tracing::warn!("extraction failed for {}: {e}", path.display());
+                    }
+                }));
             }
             DownloadResult::Skipped { url, reason } => {
                 skip_count += 1;
@@ -130,6 +145,10 @@ async fn main() -> Result<()> {
                 failed_entries.push(format!("{url}\t{error}"));
             }
         }
+    }
+
+    for handle in extract_handles {
+        let _ = handle.await;
     }
 
     // Apply diff normalization: copy diff BMS files into base directories
@@ -182,11 +201,20 @@ async fn main() -> Result<()> {
     }
 
     // Summary
+    let total_downloads = success_count + skip_count + fail_count;
+    let duration_secs = download_duration.as_secs_f64();
+    let rate = if duration_secs > 0.0 {
+        total_downloads as f64 / duration_secs
+    } else {
+        0.0
+    };
+
     println!();
     println!("=== Summary ===");
     println!("  Success: {success_count}");
     println!("  Skipped: {skip_count}");
     println!("  Failed:  {fail_count}");
+    println!("  Duration: {duration_secs:.1}s ({rate:.1} downloads/s)");
 
     if !failed_entries.is_empty() {
         println!();

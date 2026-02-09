@@ -12,7 +12,7 @@ pub struct Args {
     pub output: String,
 
     /// Number of concurrent downloads
-    #[arg(short, long, default_value_t = 4)]
+    #[arg(short, long, default_value_t = 8)]
     pub jobs: usize,
 
     /// Skip downloading diffs

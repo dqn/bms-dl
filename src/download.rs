@@ -136,20 +136,50 @@ fn is_google_drive_url(url: &str) -> bool {
 /// Parse a Google Drive virus scan confirmation page and extract the actual download URL.
 fn extract_gdrive_confirm_url(html: &str) -> Option<String> {
     let document = scraper::Html::parse_document(html);
-    let form_selector = scraper::Selector::parse("form#download-form").ok()?;
     let input_selector = scraper::Selector::parse("input[type='hidden']").ok()?;
 
-    let form = document.select(&form_selector).next()?;
-    let action = form.value().attr("action")?;
+    // Try multiple form selectors to handle different Google Drive page structures
+    let form_selectors = [
+        "form#download-form",
+        "form#downloadForm",
+        "form[action*='drive.google.com']",
+        "form[action*='drive.usercontent.google.com']",
+    ];
 
-    let mut url = url::Url::parse(action).ok()?;
-    for input in form.select(&input_selector) {
-        let name = input.value().attr("name")?;
-        let value = input.value().attr("value").unwrap_or("");
-        url.query_pairs_mut().append_pair(name, value);
+    for selector_str in &form_selectors {
+        let form_selector = match scraper::Selector::parse(selector_str) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        if let Some(form) = document.select(&form_selector).next()
+            && let Some(action) = form.value().attr("action")
+        {
+            let mut url = match url::Url::parse(action) {
+                Ok(u) => u,
+                Err(_) => continue,
+            };
+            for input in form.select(&input_selector) {
+                if let Some(name) = input.value().attr("name") {
+                    let value = input.value().attr("value").unwrap_or("");
+                    url.query_pairs_mut().append_pair(name, value);
+                }
+            }
+            return Some(url.to_string());
+        }
     }
 
-    Some(url.to_string())
+    // Fallback: look for direct download links in the page
+    let link_selector = scraper::Selector::parse("a[href]").ok()?;
+    for element in document.select(&link_selector) {
+        if let Some(href) = element.value().attr("href")
+            && (href.contains("export=download") || href.contains("confirm="))
+        {
+            return Some(href.to_string());
+        }
+    }
+
+    None
 }
 
 fn extract_filename(resp: &reqwest::Response, url: &str) -> Option<String> {
@@ -224,13 +254,72 @@ pub struct DownloadTask {
     pub label: String,
 }
 
+/// Result of URL resolution phase
+enum ResolveResult {
+    Resolved {
+        resolved: resolve::ResolvedUrl,
+        task: DownloadTask,
+    },
+    Skipped {
+        url: String,
+        reason: String,
+    },
+}
+
 /// Execute all download tasks with concurrency control and progress display.
+///
+/// Phase 1: Resolve all URLs in parallel (with `jobs * 2` concurrency).
+/// Phase 2: Download resolved URLs in parallel (with `jobs` concurrency).
 pub async fn execute_downloads(
     client: &reqwest::Client,
     tasks: Vec<DownloadTask>,
     jobs: usize,
 ) -> Vec<DownloadResult> {
-    let semaphore = Arc::new(Semaphore::new(jobs));
+    // Phase 1: Resolve URLs
+    let resolve_semaphore = Arc::new(Semaphore::new(jobs * 2));
+    let client_arc = Arc::new(client.clone());
+    let mut resolve_handles = Vec::new();
+
+    for task in tasks {
+        let sem = resolve_semaphore.clone();
+        let client = client_arc.clone();
+
+        resolve_handles.push(tokio::spawn(async move {
+            let _permit = sem.acquire().await.unwrap();
+
+            match resolve::resolve_url(&client, &task.url).await {
+                Ok(resolved) => ResolveResult::Resolved { resolved, task },
+                Err(e) => ResolveResult::Skipped {
+                    url: task.url.clone(),
+                    reason: e.to_string(),
+                },
+            }
+        }));
+    }
+
+    let mut resolved_tasks = Vec::new();
+    let mut results = Vec::new();
+
+    for handle in resolve_handles {
+        match handle.await {
+            Ok(ResolveResult::Resolved { resolved, task }) => {
+                resolved_tasks.push((resolved, task));
+            }
+            Ok(ResolveResult::Skipped { url, reason }) => {
+                tracing::warn!("skipping {url}: {reason}");
+                results.push(DownloadResult::Skipped { url, reason });
+            }
+            Err(e) => {
+                results.push(DownloadResult::Failed {
+                    url: "unknown".to_string(),
+                    error: format!("resolve task panicked: {e}"),
+                });
+            }
+        }
+    }
+
+    // Phase 2: Download resolved URLs
+    let download_semaphore = Arc::new(Semaphore::new(jobs));
     let multi_progress = MultiProgress::new();
     let style = ProgressStyle::with_template(
         "{spinner:.green} [{bar:30.cyan/blue}] {bytes}/{total_bytes} {msg}",
@@ -238,31 +327,17 @@ pub async fn execute_downloads(
     .unwrap()
     .progress_chars("=>-");
 
-    let client = client.clone();
-    let mut handles = Vec::new();
+    let mut download_handles = Vec::new();
 
-    for task in tasks {
-        let sem = semaphore.clone();
-        let client = client.clone();
+    for (resolved, task) in resolved_tasks {
+        let sem = download_semaphore.clone();
+        let client = client_arc.clone();
         let pb = multi_progress.add(ProgressBar::new(0));
         pb.set_style(style.clone());
         pb.set_message(task.label.clone());
 
-        handles.push(tokio::spawn(async move {
+        download_handles.push(tokio::spawn(async move {
             let _permit = sem.acquire().await.unwrap();
-
-            // Resolve URL
-            let resolved: resolve::ResolvedUrl =
-                match resolve::resolve_url(&client, &task.url).await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        pb.finish_with_message(format!("SKIP: {}", e));
-                        return DownloadResult::Skipped {
-                            url: task.url.clone(),
-                            reason: e.to_string(),
-                        };
-                    }
-                };
 
             // Create output directory
             if let Err(e) = tokio::fs::create_dir_all(&task.output_dir).await {
@@ -297,8 +372,7 @@ pub async fn execute_downloads(
         }));
     }
 
-    let mut results = Vec::new();
-    for handle in handles {
+    for handle in download_handles {
         match handle.await {
             Ok(result) => results.push(result),
             Err(e) => results.push(DownloadResult::Failed {
