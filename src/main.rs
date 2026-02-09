@@ -64,11 +64,17 @@ async fn main() -> Result<()> {
     for (dir_name, group) in &groups {
         let entry_dir = output_dir.join(dir_name);
 
-        // Skip existing entries if requested, but still try extraction
+        // Skip existing entries if requested, but clean up failed directories
         if args.skip_existing && entry_dir.exists() {
-            tracing::info!("skipping download for existing: {dir_name}");
             extract_unprocessed_archives(&entry_dir);
-            continue;
+
+            if normalize::contains_bms_files(&entry_dir) {
+                tracing::info!("skipping download for existing: {dir_name}");
+                continue;
+            }
+
+            tracing::warn!("cleaning up failed directory: {dir_name}");
+            std::fs::remove_dir_all(&entry_dir)?;
         }
 
         // Base download

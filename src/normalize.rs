@@ -3,6 +3,8 @@ use std::path::Path;
 
 use anyhow::Result;
 
+const BMS_EXTENSIONS: &[&str] = &["bms", "bme", "bml", "bmson"];
+
 /// Flatten single-subdirectory nesting.
 /// If a directory contains only one subdirectory and nothing else,
 /// move its contents up to the parent level. Applied recursively.
@@ -36,9 +38,20 @@ pub fn flatten_single_subdirs(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Check whether the directory contains any BMS files recursively.
+pub fn contains_bms_files(dir: &Path) -> bool {
+    let Ok(files) = walkdir(dir) else {
+        return false;
+    };
+    files.iter().any(|path| {
+        path.extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| BMS_EXTENSIONS.contains(&e.to_lowercase().as_str()))
+    })
+}
+
 /// Copy diff files (.bms, .bme, .bml, .bmson) from src_dir to dest_dir.
 pub fn copy_diff_files(src_dir: &Path, dest_dir: &Path) -> Result<u32> {
-    let bms_extensions = ["bms", "bme", "bml", "bmson"];
     let mut count = 0;
 
     if !src_dir.exists() {
@@ -52,7 +65,7 @@ pub fn copy_diff_files(src_dir: &Path, dest_dir: &Path) -> Result<u32> {
             .map(|e| e.to_lowercase())
             .unwrap_or_default();
 
-        if bms_extensions.contains(&ext.as_str()) {
+        if BMS_EXTENSIONS.contains(&ext.as_str()) {
             let filename = entry.file_name().unwrap();
             let dest = dest_dir.join(filename);
             if !dest.exists() {
