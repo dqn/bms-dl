@@ -206,16 +206,11 @@ async fn find_download_from_candidates(
 /// Generic fallback resolver: fetch the page and try to find a download link.
 /// Used for unknown domains that might be event pages with download links.
 async fn resolve_generic(client: &reqwest::Client, raw_url: &str) -> Result<ResolvedUrl> {
-    let resp = match client.get(raw_url).send().await {
-        Ok(resp) => resp,
-        Err(e) => {
-            tracing::warn!("failed to fetch {raw_url} for link extraction: {e}");
-            return Ok(ResolvedUrl {
-                url: raw_url.to_string(),
-                original: raw_url.to_string(),
-            });
-        }
-    };
+    let resp = client
+        .get(raw_url)
+        .send()
+        .await
+        .map_err(|e| anyhow!("failed to fetch {raw_url} for link extraction: {e}"))?;
 
     let content_type = resp
         .headers()
@@ -247,12 +242,8 @@ async fn resolve_generic(client: &reqwest::Client, raw_url: &str) -> Result<Reso
         Err(e) => tracing::debug!("browser fallback also failed for {raw_url}: {e}"),
     }
 
-    // All attempts failed — return URL as-is (will likely fail at download phase)
-    tracing::debug!("no download link found on {raw_url}, passing through as-is");
-    Ok(ResolvedUrl {
-        url: raw_url.to_string(),
-        original: raw_url.to_string(),
-    })
+    // All attempts failed — no download link found on this page
+    Err(anyhow!("no download link found on page: {raw_url}"))
 }
 
 async fn resolve_venue_bmssearch(client: &reqwest::Client, raw_url: &str) -> Result<ResolvedUrl> {

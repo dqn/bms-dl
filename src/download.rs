@@ -69,21 +69,40 @@ async fn try_download(
         .unwrap_or("")
         .to_string();
 
-    if content_type.contains("text/html") && is_google_drive_url(url) {
-        let html_body = resp.text().await?;
-        if let Some(confirm_url) = extract_gdrive_confirm_url(&html_body) {
-            tracing::info!("Google Drive virus scan detected, following confirmation URL");
-            let resp2 = client.get(&confirm_url).send().await?.error_for_status()?;
-            return save_response(resp2, output_dir, fallback_name, pb).await;
-        }
-        // Detect Google login redirect (file is deleted or private)
-        if html_body.contains("accounts.google.com") || html_body.contains("ServiceLogin") {
+    if content_type.contains("text/html") {
+        if is_google_drive_url(url) {
+            let html_body = resp.text().await?;
+            if let Some(confirm_url) = extract_gdrive_confirm_url(&html_body) {
+                tracing::info!("Google Drive virus scan detected, following confirmation URL");
+                let resp2 = client.get(&confirm_url).send().await?.error_for_status()?;
+                return save_response(resp2, output_dir, fallback_name, pb).await;
+            }
+            // Detect Google login redirect (file is deleted or private)
+            if html_body.contains("accounts.google.com") || html_body.contains("ServiceLogin") {
+                return Err(anyhow::anyhow!(
+                    "Google Drive file requires authentication (likely deleted or private)"
+                ));
+            }
             return Err(anyhow::anyhow!(
-                "Google Drive file requires authentication (likely deleted or private)"
+                "Google Drive returned HTML confirmation page but could not extract download URL"
             ));
         }
+
+        // Non-Google-Drive URL returned HTML — detect specific hosting service errors
+        let html_body = resp.text().await?;
+
+        if (url.contains("dropbox.com") || url.contains("dropboxusercontent.com"))
+            && (html_body.contains("doesn't exist")
+                || html_body.contains("has been removed")
+                || html_body.contains("Error (404)"))
+        {
+            return Err(anyhow::anyhow!(
+                "Dropbox file has been removed or does not exist"
+            ));
+        }
+
         return Err(anyhow::anyhow!(
-            "Google Drive returned HTML confirmation page but could not extract download URL"
+            "server returned HTML instead of archive file (Content-Type: text/html)"
         ));
     }
 
