@@ -110,6 +110,7 @@ async fn main() -> Result<()> {
     let mut skip_count = 0u32;
     let mut fail_count = 0u32;
     let mut failed_entries = Vec::new();
+    let mut skipped_entries = Vec::new();
 
     for result in &results {
         match result {
@@ -120,14 +121,13 @@ async fn main() -> Result<()> {
                     tracing::warn!("extraction failed for {}: {e}", path.display());
                 }
             }
-            DownloadResult::Skipped { reason } => {
+            DownloadResult::Skipped { url, reason } => {
                 skip_count += 1;
-                tracing::info!("skipped: {reason}");
+                skipped_entries.push(format!("{url}\t{reason}"));
             }
             DownloadResult::Failed { url, error } => {
                 fail_count += 1;
                 failed_entries.push(format!("{url}\t{error}"));
-                tracing::error!("failed: {url}: {error}");
             }
         }
     }
@@ -187,6 +187,22 @@ async fn main() -> Result<()> {
     println!("  Success: {success_count}");
     println!("  Skipped: {skip_count}");
     println!("  Failed:  {fail_count}");
+
+    if !failed_entries.is_empty() {
+        println!();
+        println!("=== Failed ===");
+        for entry in &failed_entries {
+            println!("  {entry}");
+        }
+    }
+
+    if !skipped_entries.is_empty() {
+        println!();
+        println!("=== Skipped ===");
+        for entry in &skipped_entries {
+            println!("  {entry}");
+        }
+    }
 
     Ok(())
 }

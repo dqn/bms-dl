@@ -14,7 +14,7 @@ use crate::resolve::{self, ResolvedUrl};
 #[derive(Debug)]
 pub enum DownloadResult {
     Success { path: PathBuf },
-    Skipped { reason: String },
+    Skipped { url: String, reason: String },
     Failed { url: String, error: String },
 }
 
@@ -258,6 +258,7 @@ pub async fn execute_downloads(
                     Err(e) => {
                         pb.finish_with_message(format!("SKIP: {}", e));
                         return DownloadResult::Skipped {
+                            url: task.url.clone(),
                             reason: e.to_string(),
                         };
                     }
