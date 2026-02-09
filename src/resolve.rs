@@ -38,7 +38,7 @@ pub fn resolve_url<'a>(
                 resolve_dropbox(&raw_url)
             }
             "onedrive.live.com" | "www.onedrive.live.com" => resolve_onedrive(&raw_url),
-            "manbow.nothing.sh" | "event.yaruki0.net" => {
+            "manbow.nothing.sh" | "event.yaruki0.net" | "yaruki0.sakura.ne.jp" => {
                 resolve_with_scrape_and_browser(&client, &raw_url, &host).await
             }
             "k-bms.com" | "www.k-bms.com" => resolve_kbms(&raw_url).await,
