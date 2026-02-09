@@ -53,7 +53,9 @@ pub async fn resolve_with_browser(raw_url: &str) -> Result<ResolvedUrl> {
         .into_value()?;
 
     let base_url = Url::parse(raw_url)?;
-    let archive_extensions = [".zip", ".rar", ".7z", ".lzh"];
+    let direct_download_extensions = [
+        ".zip", ".rar", ".7z", ".lzh", ".bms", ".bme", ".bml", ".pms",
+    ];
     let hosting_domains = [
         "drive.google.com",
         "dropbox.com",
@@ -69,7 +71,7 @@ pub async fn resolve_with_browser(raw_url: &str) -> Result<ResolvedUrl> {
         let resolved_str = resolved.to_string();
         let resolved_lower = resolved_str.to_lowercase();
 
-        if archive_extensions
+        if direct_download_extensions
             .iter()
             .any(|ext| resolved_lower.ends_with(ext))
         {

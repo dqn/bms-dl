@@ -130,30 +130,30 @@ async fn try_download(
         }
 
         // Try secondary resolution: extract download links from the HTML page
-        if let Ok(base_url) = url::Url::parse(url) {
-            if let Ok(links) = resolve::extract_links_from_html(&html_body, &base_url) {
-                let no_redirect_client = reqwest::Client::builder()
-                    .redirect(reqwest::redirect::Policy::limited(10))
-                    .connect_timeout(std::time::Duration::from_secs(10))
-                    .timeout(std::time::Duration::from_secs(300))
-                    .build()
-                    .unwrap_or_else(|_| client.clone());
-                if let Some(Ok(resolved)) =
-                    resolve::find_download_from_candidates(&no_redirect_client, &links, url).await
-                {
-                    tracing::info!(
-                        "secondary resolution found download link: {} -> {}",
-                        url,
-                        resolved.url
-                    );
-                    return save_response(
-                        client.get(&resolved.url).send().await?.error_for_status()?,
-                        output_dir,
-                        fallback_name,
-                        pb,
-                    )
-                    .await;
-                }
+        if let Ok(base_url) = url::Url::parse(url)
+            && let Ok(links) = resolve::extract_links_from_html(&html_body, &base_url)
+        {
+            let no_redirect_client = reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::limited(10))
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(300))
+                .build()
+                .unwrap_or_else(|_| client.clone());
+            if let Some(Ok(resolved)) =
+                resolve::find_download_from_candidates(&no_redirect_client, &links, url).await
+            {
+                tracing::info!(
+                    "secondary resolution found download link: {} -> {}",
+                    url,
+                    resolved.url
+                );
+                return save_response(
+                    client.get(&resolved.url).send().await?.error_for_status()?,
+                    output_dir,
+                    fallback_name,
+                    pb,
+                )
+                .await;
             }
         }
 
