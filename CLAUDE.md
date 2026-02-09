@@ -1,4 +1,4 @@
-# bms-downloader
+# bms-dl
 
 ## Overview
 
@@ -14,7 +14,7 @@ resolves indirect links, extracts archives, and normalizes directory structure.
 ## CLI Usage
 
 ```
-bms-downloader <TABLE_URL> [OPTIONS]
+bms-dl <TABLE_URL> [OPTIONS]
 
 Options:
   -o, --output <DIR>    Output directory [default: .]
