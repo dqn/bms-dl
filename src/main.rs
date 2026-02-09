@@ -1,0 +1,264 @@
+mod archive;
+mod browser;
+mod cli;
+mod download;
+mod normalize;
+mod resolve;
+mod table;
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+use anyhow::Result;
+use clap::Parser;
+
+use crate::cli::Args;
+use crate::download::{DownloadResult, DownloadTask};
+use crate::table::SongEntry;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive(tracing::Level::INFO.into()),
+        )
+        .init();
+
+    let args = Args::parse();
+    let output_dir = PathBuf::from(&args.output);
+    tokio::fs::create_dir_all(&output_dir).await?;
+
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .timeout(std::time::Duration::from_secs(300))
+        .cookie_store(true)
+        .build()?;
+
+    // Phase 1: Fetch table
+    tracing::info!("fetching table from {}", args.table_url);
+    let (header, entries) = table::fetch_table(&client, &args.table_url).await?;
+    tracing::info!(
+        "table '{}' ({}): {} entries",
+        header.name,
+        header.symbol,
+        entries.len()
+    );
+
+    // Filter by level if specified
+    let entries: Vec<_> = if let Some(ref level) = args.level {
+        entries
+            .into_iter()
+            .filter(|e| e.level.as_deref() == Some(level))
+            .collect()
+    } else {
+        entries
+    };
+
+    tracing::info!("{} entries after filtering", entries.len());
+
+    // Phase 2: Group entries by base URL and generate download tasks
+    let groups = group_entries(&entries, &header.symbol);
+    let mut tasks = Vec::new();
+
+    for (dir_name, group) in &groups {
+        let entry_dir = output_dir.join(dir_name);
+
+        // Skip existing entries if requested
+        if args.skip_existing && entry_dir.exists() {
+            tracing::info!("skipping existing: {dir_name}");
+            continue;
+        }
+
+        // Base download
+        if let Some(ref base_url) = group.base_url {
+            tasks.push(DownloadTask {
+                url: base_url.clone(),
+                output_dir: entry_dir.clone(),
+                fallback_name: format!("{dir_name}.zip"),
+                label: format!("[base] {dir_name}"),
+            });
+        }
+
+        // Diff downloads
+        if !args.no_diff {
+            for (i, diff_url) in group.diff_urls.iter().enumerate() {
+                tasks.push(DownloadTask {
+                    url: diff_url.clone(),
+                    output_dir: entry_dir.clone(),
+                    fallback_name: format!("{dir_name}_diff{i}.zip"),
+                    label: format!("[diff] {dir_name} #{i}"),
+                });
+            }
+        }
+    }
+
+    tracing::info!("{} download tasks generated", tasks.len());
+
+    // Phase 3-4: Download with concurrency control
+    let results = download::execute_downloads(&client, tasks, args.jobs).await;
+
+    // Phase 5-6: Extract archives and normalize
+    let mut success_count = 0u32;
+    let mut skip_count = 0u32;
+    let mut fail_count = 0u32;
+    let mut failed_entries = Vec::new();
+
+    for result in &results {
+        match result {
+            DownloadResult::Success { path } => {
+                success_count += 1;
+
+                if let Err(e) = extract_and_normalize(path) {
+                    tracing::warn!("extraction failed for {}: {e}", path.display());
+                }
+            }
+            DownloadResult::Skipped { reason } => {
+                skip_count += 1;
+                tracing::info!("skipped: {reason}");
+            }
+            DownloadResult::Failed { url, error } => {
+                fail_count += 1;
+                failed_entries.push(format!("{url}\t{error}"));
+                tracing::error!("failed: {url}: {error}");
+            }
+        }
+    }
+
+    // Apply diff normalization: copy diff BMS files into base directories
+    for dir_name in groups.keys() {
+        let entry_dir = output_dir.join(dir_name);
+        if !entry_dir.exists() {
+            continue;
+        }
+
+        // Find the main content directory (non-hidden)
+        let main_dirs: Vec<_> = std::fs::read_dir(&entry_dir)?
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_type().map(|t| t.is_dir()).unwrap_or(false)
+                    && !e.file_name().to_string_lossy().starts_with('.')
+            })
+            .collect();
+
+        // Find diff extracted directories
+        let diff_dirs: Vec<_> = std::fs::read_dir(&entry_dir)?
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_type().map(|t| t.is_dir()).unwrap_or(false)
+                    && e.file_name().to_string_lossy().starts_with('.')
+                    && e.file_name().to_string_lossy().ends_with("_extracted")
+            })
+            .collect();
+
+        if let Some(main_dir) = main_dirs.first() {
+            for diff_dir in &diff_dirs {
+                let count =
+                    normalize::copy_diff_files(&diff_dir.path(), &main_dir.path()).unwrap_or(0);
+                if count > 0 {
+                    tracing::info!(
+                        "copied {count} diff files into {}",
+                        main_dir.path().display()
+                    );
+                }
+                // Clean up diff extracted directory
+                let _ = std::fs::remove_dir_all(diff_dir.path());
+            }
+        }
+    }
+
+    // Write failed log
+    if !failed_entries.is_empty() {
+        let failed_log = output_dir.join("failed.log");
+        tokio::fs::write(&failed_log, failed_entries.join("\n")).await?;
+        tracing::info!("failed entries written to {}", failed_log.display());
+    }
+
+    // Summary
+    println!();
+    println!("=== Summary ===");
+    println!("  Success: {success_count}");
+    println!("  Skipped: {skip_count}");
+    println!("  Failed:  {fail_count}");
+
+    Ok(())
+}
+
+struct EntryGroup {
+    base_url: Option<String>,
+    diff_urls: Vec<String>,
+}
+
+fn group_entries(entries: &[SongEntry], symbol: &str) -> HashMap<String, EntryGroup> {
+    let mut groups: HashMap<String, EntryGroup> = HashMap::new();
+
+    for entry in entries {
+        let dir_name = make_dir_name(entry, symbol);
+
+        let group = groups.entry(dir_name).or_insert_with(|| EntryGroup {
+            base_url: None,
+            diff_urls: Vec::new(),
+        });
+
+        if group.base_url.is_none()
+            && let Some(ref url) = entry.url
+            && !url.is_empty()
+        {
+            group.base_url = Some(url.clone());
+        }
+
+        if let Some(ref diff_url) = entry.url_diff
+            && !diff_url.is_empty()
+            && !group.diff_urls.contains(diff_url)
+        {
+            group.diff_urls.push(diff_url.clone());
+        }
+    }
+
+    groups
+}
+
+fn make_dir_name(entry: &SongEntry, symbol: &str) -> String {
+    let level = entry.level.as_deref().unwrap_or("_");
+    let title = entry.title.as_deref().unwrap_or("unknown");
+
+    let name = format!("{symbol}{level}_{title}");
+    sanitize_dir_name(&name)
+}
+
+fn sanitize_dir_name(name: &str) -> String {
+    name.chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0' => '_',
+            _ => c,
+        })
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+fn extract_and_normalize(archive_path: &Path) -> Result<()> {
+    let parent = archive_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("archive has no parent directory"))?;
+
+    let extract_dir = archive::extract_archive(archive_path, parent)?;
+
+    // Flatten single subdirectories
+    normalize::flatten_single_subdirs(&extract_dir)?;
+
+    // Move extracted contents to parent
+    for entry in std::fs::read_dir(&extract_dir)? {
+        let entry = entry?;
+        let dest = parent.join(entry.file_name());
+        if !dest.exists() {
+            std::fs::rename(entry.path(), &dest)?;
+        }
+    }
+
+    // Clean up
+    let _ = std::fs::remove_dir_all(&extract_dir);
+    let _ = std::fs::remove_file(archive_path);
+
+    Ok(())
+}

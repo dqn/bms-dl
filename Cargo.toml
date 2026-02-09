@@ -1,0 +1,25 @@
+[package]
+name = "bms-downloader"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+chromiumoxide = { version = "0.7", features = ["tokio"] }
+clap = { version = "4", features = ["derive", "env"] }
+delharc = "0.6"
+encoding_rs = "0.8"
+futures-util = "0.3"
+indicatif = "0.17"
+reqwest = { version = "0.12", features = ["cookies", "json", "stream"] }
+scraper = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sevenz-rust2 = "0.12"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+unrar = "0.5"
+url = "2"
+urlencoding = "2"
+zip = "2"
