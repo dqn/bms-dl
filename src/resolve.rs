@@ -29,6 +29,7 @@ pub fn resolve_url<'a>(
                 resolve_dropbox(&raw_url)
             }
             "manbow.nothing.sh" => resolve_manbow(&client, &raw_url).await,
+            "venue.bmssearch.net" => resolve_venue_bmssearch(&client, &raw_url).await,
             "mega.nz" => Err(anyhow!(
                 "mega.nz is not supported (encryption API required)"
             )),
@@ -101,14 +102,37 @@ fn resolve_dropbox(raw_url: &str) -> Result<ResolvedUrl> {
     })
 }
 
-async fn resolve_manbow(client: &reqwest::Client, raw_url: &str) -> Result<ResolvedUrl> {
-    let html_text = client.get(raw_url).send().await?.text().await?;
+/// Extract download URLs from JSON embedded in HTML (e.g. Next.js SSR pages).
+/// Looks for `"downloadURL":"..."` patterns in script tags.
+fn extract_json_download_urls(html: &str) -> Vec<String> {
+    let needle = "\"downloadURL\":\"";
+    let mut urls = Vec::new();
+    let mut search_from = 0;
 
-    let base_url = Url::parse(raw_url)?;
+    while let Some(start) = html[search_from..].find(needle) {
+        let url_start = search_from + start + needle.len();
+        if let Some(end) = html[url_start..].find('"') {
+            let raw = &html[url_start..url_start + end];
+            // Unescape JSON forward-slash escaping
+            let url = raw.replace("\\/", "/");
+            urls.push(url);
+            search_from = url_start + end;
+        } else {
+            break;
+        }
+    }
 
-    // Collect candidate URLs from the HTML (no async while iterating scraper types)
-    let candidate_urls = extract_links_from_html(&html_text, &base_url)?;
+    urls
+}
 
+/// Check a list of candidate URLs for archive or hosting service links.
+/// Returns `Some(Ok(...))` if a download link is found,
+/// `Some(Err(...))` if resolution failed, or `None` if no candidates matched.
+async fn find_download_from_candidates(
+    client: &reqwest::Client,
+    candidates: &[String],
+    raw_url: &str,
+) -> Option<Result<ResolvedUrl>> {
     let archive_extensions = [".zip", ".rar", ".7z", ".lzh"];
     let hosting_domains = [
         "drive.google.com",
@@ -118,27 +142,55 @@ async fn resolve_manbow(client: &reqwest::Client, raw_url: &str) -> Result<Resol
         "1drv.ms",
     ];
 
-    for resolved_str in &candidate_urls {
-        let resolved_lower = resolved_str.to_lowercase();
+    for candidate in candidates {
+        let lower = candidate.to_lowercase();
 
         // Check for direct archive links
-        if archive_extensions
-            .iter()
-            .any(|ext| resolved_lower.ends_with(ext))
-        {
-            return Ok(ResolvedUrl {
-                url: resolved_str.clone(),
+        if archive_extensions.iter().any(|ext| lower.ends_with(ext)) {
+            return Some(Ok(ResolvedUrl {
+                url: candidate.clone(),
                 original: raw_url.to_string(),
-            });
+            }));
         }
 
         // Check for hosting service links and resolve them
-        if let Ok(resolved_parsed) = Url::parse(resolved_str)
-            && let Some(host) = resolved_parsed.host_str()
+        if let Ok(parsed) = Url::parse(candidate)
+            && let Some(host) = parsed.host_str()
             && hosting_domains.iter().any(|d| host.contains(d))
         {
-            return resolve_url(client, resolved_str).await;
+            return Some(resolve_url(client, candidate).await);
         }
+    }
+
+    None
+}
+
+async fn resolve_venue_bmssearch(client: &reqwest::Client, raw_url: &str) -> Result<ResolvedUrl> {
+    let html_text = client.get(raw_url).send().await?.text().await?;
+
+    // Try JSON-embedded download URLs first (Next.js SSR)
+    let mut candidates = extract_json_download_urls(&html_text);
+
+    // Fallback: extract <a href> links
+    let base_url = Url::parse(raw_url)?;
+    candidates.extend(extract_links_from_html(&html_text, &base_url)?);
+
+    match find_download_from_candidates(client, &candidates, raw_url).await {
+        Some(result) => result,
+        None => Err(anyhow!(
+            "no download link found on venue.bmssearch.net page: {raw_url}"
+        )),
+    }
+}
+
+async fn resolve_manbow(client: &reqwest::Client, raw_url: &str) -> Result<ResolvedUrl> {
+    let html_text = client.get(raw_url).send().await?.text().await?;
+
+    let base_url = Url::parse(raw_url)?;
+    let candidate_urls = extract_links_from_html(&html_text, &base_url)?;
+
+    if let Some(result) = find_download_from_candidates(client, &candidate_urls, raw_url).await {
+        return result;
     }
 
     tracing::info!(
