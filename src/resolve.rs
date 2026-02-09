@@ -37,7 +37,7 @@ pub fn resolve_url<'a>(
             "dropbox.com" | "www.dropbox.com" | "dl.dropboxusercontent.com" => {
                 resolve_dropbox(&raw_url)
             }
-            "onedrive.live.com" | "www.onedrive.live.com" => resolve_onedrive(&raw_url),
+            "onedrive.live.com" | "www.onedrive.live.com" | "skydrive.live.com" => resolve_onedrive(&raw_url),
             "manbow.nothing.sh" | "event.yaruki0.net" | "yaruki0.sakura.ne.jp" => {
                 resolve_with_scrape_and_browser(&client, &raw_url, &host).await
             }
@@ -46,11 +46,12 @@ pub fn resolve_url<'a>(
             "mega.nz" => Err(anyhow!(
                 "mega.nz is not supported (encryption API required)"
             )),
+            "1drv.ms" => resolve_1drv_ms(&client, &raw_url).await,
             _ => {
                 // Pass through URLs with archive extensions directly
                 let path_lower = parsed.path().to_lowercase();
-                let archive_extensions = [".zip", ".rar", ".7z", ".lzh"];
-                if archive_extensions
+                let direct_download_extensions = [".zip", ".rar", ".7z", ".lzh", ".bms", ".bme", ".bml", ".pms"];
+                if direct_download_extensions
                     .iter()
                     .any(|ext| path_lower.ends_with(ext))
                 {
@@ -165,7 +166,7 @@ async fn find_download_from_candidates(
     candidates: &[String],
     raw_url: &str,
 ) -> Option<Result<ResolvedUrl>> {
-    let archive_extensions = [".zip", ".rar", ".7z", ".lzh"];
+    let direct_download_extensions = [".zip", ".rar", ".7z", ".lzh", ".bms", ".bme", ".bml", ".pms"];
     let hosting_domains = [
         "drive.google.com",
         "dropbox.com",
@@ -178,10 +179,10 @@ async fn find_download_from_candidates(
         // Check for direct archive links using only the path component (ignoring query params)
         let is_archive = if let Ok(parsed) = Url::parse(candidate) {
             let path = parsed.path().to_lowercase();
-            archive_extensions.iter().any(|ext| path.ends_with(ext))
+            direct_download_extensions.iter().any(|ext| path.ends_with(ext))
         } else {
             let lower = candidate.to_lowercase();
-            archive_extensions.iter().any(|ext| lower.ends_with(ext))
+            direct_download_extensions.iter().any(|ext| lower.ends_with(ext))
         };
 
         if is_archive {
@@ -301,6 +302,29 @@ async fn resolve_kbms(raw_url: &str) -> Result<ResolvedUrl> {
     })
 }
 
+/// Resolve 1drv.ms short URLs by following the redirect.
+async fn resolve_1drv_ms(client: &reqwest::Client, raw_url: &str) -> Result<ResolvedUrl> {
+    let no_redirect_client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+
+    let resp = no_redirect_client
+        .get(raw_url)
+        .send()
+        .await
+        .map_err(|e| anyhow!("failed to follow 1drv.ms redirect: {e}"))?;
+
+    let location = resp
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| anyhow!("1drv.ms URL did not redirect: {raw_url}"))?
+        .to_string();
+
+    tracing::info!("1drv.ms redirected to: {location}");
+    resolve_url(client, &location).await
+}
+
 /// Resolve OneDrive shared links to direct download URLs.
 fn resolve_onedrive(raw_url: &str) -> Result<ResolvedUrl> {
     let parsed = Url::parse(raw_url)?;
@@ -331,7 +355,7 @@ fn resolve_onedrive(raw_url: &str) -> Result<ResolvedUrl> {
     })
 }
 
-fn extract_links_from_html(html: &str, base_url: &Url) -> Result<Vec<String>> {
+pub fn extract_links_from_html(html: &str, base_url: &Url) -> Result<Vec<String>> {
     let document = Html::parse_document(html);
     let link_selector =
         Selector::parse("a[href]").map_err(|e| anyhow!("failed to parse selector: {e}"))?;
