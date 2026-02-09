@@ -76,6 +76,12 @@ async fn try_download(
             let resp2 = client.get(&confirm_url).send().await?.error_for_status()?;
             return save_response(resp2, output_dir, fallback_name, pb).await;
         }
+        // Detect Google login redirect (file is deleted or private)
+        if html_body.contains("accounts.google.com") || html_body.contains("ServiceLogin") {
+            return Err(anyhow::anyhow!(
+                "Google Drive file requires authentication (likely deleted or private)"
+            ));
+        }
         return Err(anyhow::anyhow!(
             "Google Drive returned HTML confirmation page but could not extract download URL"
         ));

@@ -155,10 +155,16 @@ async fn find_download_from_candidates(
     ];
 
     for candidate in candidates {
-        let lower = candidate.to_lowercase();
+        // Check for direct archive links using only the path component (ignoring query params)
+        let is_archive = if let Ok(parsed) = Url::parse(candidate) {
+            let path = parsed.path().to_lowercase();
+            archive_extensions.iter().any(|ext| path.ends_with(ext))
+        } else {
+            let lower = candidate.to_lowercase();
+            archive_extensions.iter().any(|ext| lower.ends_with(ext))
+        };
 
-        // Check for direct archive links
-        if archive_extensions.iter().any(|ext| lower.ends_with(ext)) {
+        if is_archive {
             return Some(Ok(ResolvedUrl {
                 url: candidate.clone(),
                 original: raw_url.to_string(),
@@ -214,7 +220,14 @@ async fn resolve_generic(client: &reqwest::Client, raw_url: &str) -> Result<Reso
         return result;
     }
 
-    // No download link found — return URL as-is (will likely fail at download phase)
+    // No download link found via HTML — try headless browser for SPA pages
+    tracing::info!("no download link found via HTML on {raw_url}, trying headless browser");
+    match browser::resolve_with_browser(raw_url).await {
+        Ok(resolved) => return Ok(resolved),
+        Err(e) => tracing::debug!("browser fallback also failed for {raw_url}: {e}"),
+    }
+
+    // All attempts failed — return URL as-is (will likely fail at download phase)
     tracing::debug!("no download link found on {raw_url}, passing through as-is");
     Ok(ResolvedUrl {
         url: raw_url.to_string(),
