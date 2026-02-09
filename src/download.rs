@@ -18,6 +18,30 @@ pub enum DownloadResult {
     Failed { url: String, error: String },
 }
 
+/// Whether a download error is worth retrying.
+/// HTTP 4xx and content-type mismatches are deterministic — retrying won't help.
+fn is_retryable(err: &anyhow::Error) -> bool {
+    let msg = err.to_string();
+
+    // HTTP 4xx errors are deterministic — file doesn't exist or access denied
+    if msg.contains("status client error") {
+        return false;
+    }
+
+    // Content-type mismatch — server consistently returns HTML
+    if msg.contains("server returned HTML")
+        || msg.contains("Dropbox file has been removed")
+        || msg.contains("Google Drive file requires authentication")
+        || msg.contains("Google Drive returned HTML confirmation")
+        || msg.contains("downloaded file is HTML")
+    {
+        return false;
+    }
+
+    // Everything else (5xx, network, timeout) is worth retrying
+    true
+}
+
 /// Download a file from a resolved URL to the given directory.
 async fn download_file(
     client: &reqwest::Client,
@@ -39,11 +63,15 @@ async fn download_file(
             Ok(path) => return Ok(path),
             Err(e) => {
                 tracing::warn!(
-                    "download attempt {}/{} failed for {}: {e}",
+                    "download attempt {}/{} failed for {} (resolved: {}): {e}",
                     attempt + 1,
                     3,
-                    resolved.original
+                    resolved.original,
+                    resolved.url,
                 );
+                if !is_retryable(&e) {
+                    return Err(e);
+                }
                 last_error = Some(e);
             }
         }
@@ -388,9 +416,14 @@ pub async fn execute_downloads(
                 }
                 Err(e) => {
                     pb.finish_with_message(format!("FAIL: {e}"));
+                    let error = if resolved.url != task.url {
+                        format!("[resolved: {}] {e}", resolved.url)
+                    } else {
+                        e.to_string()
+                    };
                     DownloadResult::Failed {
                         url: task.url.clone(),
-                        error: e.to_string(),
+                        error,
                     }
                 }
             }
