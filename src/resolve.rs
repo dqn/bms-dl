@@ -33,10 +33,22 @@ pub fn resolve_url<'a>(
             "mega.nz" => Err(anyhow!(
                 "mega.nz is not supported (encryption API required)"
             )),
-            _ => Ok(ResolvedUrl {
-                url: raw_url.clone(),
-                original: raw_url,
-            }),
+            _ => {
+                // Pass through URLs with archive extensions directly
+                let path_lower = parsed.path().to_lowercase();
+                let archive_extensions = [".zip", ".rar", ".7z", ".lzh"];
+                if archive_extensions
+                    .iter()
+                    .any(|ext| path_lower.ends_with(ext))
+                {
+                    return Ok(ResolvedUrl {
+                        url: raw_url.clone(),
+                        original: raw_url,
+                    });
+                }
+                // Otherwise try to extract a download link from the page
+                resolve_generic(&client, &raw_url).await
+            }
         }
     })
 }
@@ -163,6 +175,51 @@ async fn find_download_from_candidates(
     }
 
     None
+}
+
+/// Generic fallback resolver: fetch the page and try to find a download link.
+/// Used for unknown domains that might be event pages with download links.
+async fn resolve_generic(client: &reqwest::Client, raw_url: &str) -> Result<ResolvedUrl> {
+    let resp = match client.get(raw_url).send().await {
+        Ok(resp) => resp,
+        Err(e) => {
+            tracing::warn!("failed to fetch {raw_url} for link extraction: {e}");
+            return Ok(ResolvedUrl {
+                url: raw_url.to_string(),
+                original: raw_url.to_string(),
+            });
+        }
+    };
+
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    // If the response is not HTML, it's likely a direct download
+    if !content_type.contains("text/html") {
+        return Ok(ResolvedUrl {
+            url: raw_url.to_string(),
+            original: raw_url.to_string(),
+        });
+    }
+
+    let html_text = resp.text().await?;
+    let base_url = Url::parse(raw_url)?;
+    let candidate_urls = extract_links_from_html(&html_text, &base_url)?;
+
+    if let Some(result) = find_download_from_candidates(client, &candidate_urls, raw_url).await {
+        return result;
+    }
+
+    // No download link found — return URL as-is (will likely fail at download phase)
+    tracing::debug!("no download link found on {raw_url}, passing through as-is");
+    Ok(ResolvedUrl {
+        url: raw_url.to_string(),
+        original: raw_url.to_string(),
+    })
 }
 
 async fn resolve_venue_bmssearch(client: &reqwest::Client, raw_url: &str) -> Result<ResolvedUrl> {
