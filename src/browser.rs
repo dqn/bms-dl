@@ -6,7 +6,6 @@ use url::Url;
 use crate::resolve::ResolvedUrl;
 
 /// Resolve download URL using headless Chrome for JS-rendered pages.
-#[allow(dead_code)]
 pub async fn resolve_with_browser(raw_url: &str) -> Result<ResolvedUrl> {
     let config = BrowserConfig::builder()
         .no_sandbox()

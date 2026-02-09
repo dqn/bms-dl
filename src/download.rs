@@ -7,6 +7,7 @@ use reqwest::header;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Semaphore;
 
+use crate::archive;
 use crate::resolve::{self, ResolvedUrl};
 
 /// Result of a single download task
@@ -60,8 +61,37 @@ async fn try_download(
 ) -> Result<PathBuf> {
     let resp = client.get(url).send().await?.error_for_status()?;
 
-    // Determine filename from Content-Disposition or URL path
-    let filename = extract_filename(&resp, url).unwrap_or_else(|| fallback_name.to_string());
+    // Check if this is a Google Drive virus scan confirmation page
+    let content_type = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    if content_type.contains("text/html") && is_google_drive_url(url) {
+        let html_body = resp.text().await?;
+        if let Some(confirm_url) = extract_gdrive_confirm_url(&html_body) {
+            tracing::info!("Google Drive virus scan detected, following confirmation URL");
+            let resp2 = client.get(&confirm_url).send().await?.error_for_status()?;
+            return save_response(resp2, output_dir, fallback_name, pb).await;
+        }
+        return Err(anyhow::anyhow!(
+            "Google Drive returned HTML confirmation page but could not extract download URL"
+        ));
+    }
+
+    save_response(resp, output_dir, fallback_name, pb).await
+}
+
+async fn save_response(
+    resp: reqwest::Response,
+    output_dir: &Path,
+    fallback_name: &str,
+    pb: &ProgressBar,
+) -> Result<PathBuf> {
+    let filename =
+        extract_filename(&resp, resp.url().as_str()).unwrap_or_else(|| fallback_name.to_string());
     let dest = output_dir.join(&filename);
     let tmp = output_dir.join(format!(".{filename}.tmp"));
 
@@ -88,7 +118,38 @@ async fn try_download(
 
     tokio::fs::rename(&tmp, &dest).await?;
 
+    // Validate downloaded content is not HTML
+    if archive::is_html(&dest) {
+        let _ = tokio::fs::remove_file(&dest).await;
+        return Err(anyhow::anyhow!(
+            "downloaded file is HTML, not an archive (possible redirect or error page)"
+        ));
+    }
+
     Ok(dest)
+}
+
+fn is_google_drive_url(url: &str) -> bool {
+    url.contains("drive.google.com") || url.contains("drive.usercontent.google.com")
+}
+
+/// Parse a Google Drive virus scan confirmation page and extract the actual download URL.
+fn extract_gdrive_confirm_url(html: &str) -> Option<String> {
+    let document = scraper::Html::parse_document(html);
+    let form_selector = scraper::Selector::parse("form#download-form").ok()?;
+    let input_selector = scraper::Selector::parse("input[type='hidden']").ok()?;
+
+    let form = document.select(&form_selector).next()?;
+    let action = form.value().attr("action")?;
+
+    let mut url = url::Url::parse(action).ok()?;
+    for input in form.select(&input_selector) {
+        let name = input.value().attr("name")?;
+        let value = input.value().attr("value").unwrap_or("");
+        url.query_pairs_mut().append_pair(name, value);
+    }
+
+    Some(url.to_string())
 }
 
 fn extract_filename(resp: &reqwest::Response, url: &str) -> Option<String> {

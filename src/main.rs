@@ -64,9 +64,10 @@ async fn main() -> Result<()> {
     for (dir_name, group) in &groups {
         let entry_dir = output_dir.join(dir_name);
 
-        // Skip existing entries if requested
+        // Skip existing entries if requested, but still try extraction
         if args.skip_existing && entry_dir.exists() {
-            tracing::info!("skipping existing: {dir_name}");
+            tracing::info!("skipping download for existing: {dir_name}");
+            extract_unprocessed_archives(&entry_dir);
             continue;
         }
 
@@ -235,6 +236,41 @@ fn sanitize_dir_name(name: &str) -> String {
         .collect::<String>()
         .trim()
         .to_string()
+}
+
+/// Scan a directory for unextracted archives and HTML junk files.
+/// Extracts valid archives and removes HTML files that were saved by mistake.
+fn extract_unprocessed_archives(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+
+        let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if fname.starts_with('.') {
+            continue;
+        }
+
+        // Remove HTML files that were saved by mistake
+        if archive::is_html(&path) {
+            tracing::warn!("removing HTML junk file: {}", path.display());
+            let _ = std::fs::remove_file(&path);
+            continue;
+        }
+
+        // Try to extract if it looks like an archive
+        if archive::ArchiveFormat::detect(&path).is_ok() {
+            tracing::info!("extracting unprocessed archive: {}", path.display());
+            if let Err(e) = extract_and_normalize(&path) {
+                tracing::warn!("extraction failed for {}: {e}", path.display());
+            }
+        }
+    }
 }
 
 fn extract_and_normalize(archive_path: &Path) -> Result<()> {

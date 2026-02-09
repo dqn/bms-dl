@@ -174,6 +174,19 @@ fn extract_lzh(archive_path: &Path, output_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Check if the file at path appears to be HTML content.
+pub fn is_html(path: &Path) -> bool {
+    let Ok(mut file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut buf = [0u8; 512];
+    let Ok(n) = file.read(&mut buf) else {
+        return false;
+    };
+    let content = String::from_utf8_lossy(&buf[..n]).to_lowercase();
+    content.contains("<!doctype html") || content.contains("<html")
+}
+
 /// Extract archive and return the output directory path (for cleanup).
 pub fn extract_archive(archive_path: &Path, base_dir: &Path) -> Result<PathBuf> {
     let stem = archive_path

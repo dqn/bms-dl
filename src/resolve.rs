@@ -2,6 +2,8 @@ use anyhow::{Result, anyhow};
 use scraper::{Html, Selector};
 use url::Url;
 
+use crate::browser;
+
 /// Resolved download URL with metadata
 #[derive(Debug, Clone)]
 pub struct ResolvedUrl {
@@ -139,7 +141,15 @@ async fn resolve_manbow(client: &reqwest::Client, raw_url: &str) -> Result<Resol
         }
     }
 
-    Err(anyhow!("no download link found on manbow page: {raw_url}"))
+    tracing::info!(
+        "no download link found via HTML scraping on {raw_url}, trying headless browser"
+    );
+    match browser::resolve_with_browser(raw_url).await {
+        Ok(resolved) => Ok(resolved),
+        Err(e) => Err(anyhow!(
+            "no download link found on manbow page (HTML scraping and browser both failed): {raw_url}: {e}"
+        )),
+    }
 }
 
 fn extract_links_from_html(html: &str, base_url: &Url) -> Result<Vec<String>> {
