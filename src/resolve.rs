@@ -37,7 +37,9 @@ pub fn resolve_url<'a>(
             "dropbox.com" | "www.dropbox.com" | "dl.dropboxusercontent.com" => {
                 resolve_dropbox(&raw_url)
             }
-            "onedrive.live.com" | "www.onedrive.live.com" | "skydrive.live.com" => resolve_onedrive(&raw_url),
+            "onedrive.live.com" | "www.onedrive.live.com" | "skydrive.live.com" => {
+                resolve_onedrive(&raw_url)
+            }
             "manbow.nothing.sh" | "event.yaruki0.net" | "yaruki0.sakura.ne.jp" => {
                 resolve_with_scrape_and_browser(&client, &raw_url, &host).await
             }
@@ -50,7 +52,9 @@ pub fn resolve_url<'a>(
             _ => {
                 // Pass through URLs with archive extensions directly
                 let path_lower = parsed.path().to_lowercase();
-                let direct_download_extensions = [".zip", ".rar", ".7z", ".lzh", ".bms", ".bme", ".bml", ".pms"];
+                let direct_download_extensions = [
+                    ".zip", ".rar", ".7z", ".lzh", ".bms", ".bme", ".bml", ".pms",
+                ];
                 if direct_download_extensions
                     .iter()
                     .any(|ext| path_lower.ends_with(ext))
@@ -161,12 +165,14 @@ fn extract_json_download_urls(html: &str) -> Vec<String> {
 /// Check a list of candidate URLs for archive or hosting service links.
 /// Returns `Some(Ok(...))` if a download link is found,
 /// `Some(Err(...))` if resolution failed, or `None` if no candidates matched.
-async fn find_download_from_candidates(
+pub async fn find_download_from_candidates(
     client: &reqwest::Client,
     candidates: &[String],
     raw_url: &str,
 ) -> Option<Result<ResolvedUrl>> {
-    let direct_download_extensions = [".zip", ".rar", ".7z", ".lzh", ".bms", ".bme", ".bml", ".pms"];
+    let direct_download_extensions = [
+        ".zip", ".rar", ".7z", ".lzh", ".bms", ".bme", ".bml", ".pms",
+    ];
     let hosting_domains = [
         "drive.google.com",
         "dropbox.com",
@@ -179,10 +185,14 @@ async fn find_download_from_candidates(
         // Check for direct archive links using only the path component (ignoring query params)
         let is_archive = if let Ok(parsed) = Url::parse(candidate) {
             let path = parsed.path().to_lowercase();
-            direct_download_extensions.iter().any(|ext| path.ends_with(ext))
+            direct_download_extensions
+                .iter()
+                .any(|ext| path.ends_with(ext))
         } else {
             let lower = candidate.to_lowercase();
-            direct_download_extensions.iter().any(|ext| lower.ends_with(ext))
+            direct_download_extensions
+                .iter()
+                .any(|ext| lower.ends_with(ext))
         };
 
         if is_archive {
