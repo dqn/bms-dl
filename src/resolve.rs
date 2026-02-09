@@ -347,17 +347,23 @@ fn resolve_onedrive(raw_url: &str) -> Result<ResolvedUrl> {
         .map(|(_, v)| v.into_owned())
         .ok_or_else(|| anyhow!("failed to extract resource ID from OneDrive URL: {raw_url}"))?;
 
-    // Extract authkey if present
+    // Extract optional parameters
     let authkey = parsed
         .query_pairs()
         .find(|(k, _)| k == "authkey")
         .map(|(_, v)| v.into_owned());
+    let cid = parsed
+        .query_pairs()
+        .find(|(k, _)| k == "cid")
+        .map(|(_, v)| v.into_owned());
 
-    let download_url = if let Some(authkey) = authkey {
-        format!("https://onedrive.live.com/download?resid={resid}&authkey={authkey}")
-    } else {
-        format!("https://onedrive.live.com/download?resid={resid}")
-    };
+    let mut download_url = format!("https://onedrive.live.com/download?resid={resid}");
+    if let Some(authkey) = authkey {
+        download_url.push_str(&format!("&authkey={authkey}"));
+    }
+    if let Some(cid) = cid {
+        download_url.push_str(&format!("&cid={cid}"));
+    }
 
     Ok(ResolvedUrl {
         url: download_url,
