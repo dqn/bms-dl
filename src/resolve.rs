@@ -20,6 +20,15 @@ pub fn resolve_url<'a>(
     let raw_url = raw_url.to_string();
     let client = client.clone();
     Box::pin(async move {
+        // Trim non-URL prefix (e.g. "東方https://..." → "https://...")
+        let raw_url = match raw_url.find("https://").or_else(|| raw_url.find("http://")) {
+            Some(pos) if pos > 0 => {
+                tracing::warn!("trimmed prefix from URL: {raw_url}");
+                raw_url[pos..].to_string()
+            }
+            _ => raw_url,
+        };
+
         let parsed = Url::parse(&raw_url)?;
         let host = parsed.host_str().unwrap_or("").to_string();
 
@@ -28,7 +37,11 @@ pub fn resolve_url<'a>(
             "dropbox.com" | "www.dropbox.com" | "dl.dropboxusercontent.com" => {
                 resolve_dropbox(&raw_url)
             }
-            "manbow.nothing.sh" => resolve_manbow(&client, &raw_url).await,
+            "onedrive.live.com" | "www.onedrive.live.com" => resolve_onedrive(&raw_url),
+            "manbow.nothing.sh" | "event.yaruki0.net" => {
+                resolve_with_scrape_and_browser(&client, &raw_url, &host).await
+            }
+            "k-bms.com" | "www.k-bms.com" => resolve_kbms(&raw_url).await,
             "venue.bmssearch.net" => resolve_venue_bmssearch(&client, &raw_url).await,
             "mega.nz" => Err(anyhow!(
                 "mega.nz is not supported (encryption API required)"
@@ -56,6 +69,13 @@ pub fn resolve_url<'a>(
 fn resolve_google_drive(raw_url: &str) -> Result<ResolvedUrl> {
     let parsed = Url::parse(raw_url)?;
     let path = parsed.path();
+
+    // Google Drive folders cannot be downloaded directly
+    if path.contains("/folders/") {
+        return Err(anyhow!(
+            "Google Drive folder URLs are not supported (only individual file links): {raw_url}"
+        ));
+    }
 
     // Extract file ID: try /file/d/{id} pattern first
     let file_id = path
@@ -253,7 +273,13 @@ async fn resolve_venue_bmssearch(client: &reqwest::Client, raw_url: &str) -> Res
     }
 }
 
-async fn resolve_manbow(client: &reqwest::Client, raw_url: &str) -> Result<ResolvedUrl> {
+/// Common resolver: scrape HTML for links, then fall back to headless browser.
+/// Used for sites like manbow.nothing.sh and event.yaruki0.net.
+async fn resolve_with_scrape_and_browser(
+    client: &reqwest::Client,
+    raw_url: &str,
+    site_name: &str,
+) -> Result<ResolvedUrl> {
     let html_text = client.get(raw_url).send().await?.text().await?;
 
     let base_url = Url::parse(raw_url)?;
@@ -269,9 +295,49 @@ async fn resolve_manbow(client: &reqwest::Client, raw_url: &str) -> Result<Resol
     match browser::resolve_with_browser(raw_url).await {
         Ok(resolved) => Ok(resolved),
         Err(e) => Err(anyhow!(
-            "no download link found on manbow page (HTML scraping and browser both failed): {raw_url}: {e}"
+            "no download link found on {site_name} (HTML scraping and browser both failed): {raw_url}: {e}"
         )),
     }
+}
+
+/// Resolve k-bms.com URLs using headless browser (site uses JS-based security).
+async fn resolve_kbms(raw_url: &str) -> Result<ResolvedUrl> {
+    tracing::info!("k-bms.com requires JS execution, using headless browser: {raw_url}");
+    browser::resolve_with_browser(raw_url).await.map_err(|e| {
+        anyhow!(
+            "failed to resolve k-bms.com via browser (JS security verification): {raw_url}: {e}"
+        )
+    })
+}
+
+/// Resolve OneDrive shared links to direct download URLs.
+fn resolve_onedrive(raw_url: &str) -> Result<ResolvedUrl> {
+    let parsed = Url::parse(raw_url)?;
+
+    // Extract resid from query parameters (try "resid", then "id")
+    let resid = parsed
+        .query_pairs()
+        .find(|(k, _)| k == "resid")
+        .or_else(|| parsed.query_pairs().find(|(k, _)| k == "id"))
+        .map(|(_, v)| v.into_owned())
+        .ok_or_else(|| anyhow!("failed to extract resource ID from OneDrive URL: {raw_url}"))?;
+
+    // Extract authkey if present
+    let authkey = parsed
+        .query_pairs()
+        .find(|(k, _)| k == "authkey")
+        .map(|(_, v)| v.into_owned());
+
+    let download_url = if let Some(authkey) = authkey {
+        format!("https://onedrive.live.com/download?resid={resid}&authkey={authkey}")
+    } else {
+        format!("https://onedrive.live.com/download?resid={resid}")
+    };
+
+    Ok(ResolvedUrl {
+        url: download_url,
+        original: raw_url.to_string(),
+    })
 }
 
 fn extract_links_from_html(html: &str, base_url: &Url) -> Result<Vec<String>> {

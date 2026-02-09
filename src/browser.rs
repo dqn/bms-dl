@@ -1,12 +1,25 @@
+use std::sync::OnceLock;
+
 use anyhow::{Result, anyhow};
 use chromiumoxide::browser::{Browser, BrowserConfig};
 use futures_util::StreamExt;
+use tokio::sync::Semaphore;
 use url::Url;
 
 use crate::resolve::ResolvedUrl;
 
+/// Serialize browser launches to avoid SingletonLock conflicts between
+/// concurrent Chromium instances.
+static BROWSER_SEMAPHORE: OnceLock<Semaphore> = OnceLock::new();
+
+fn browser_semaphore() -> &'static Semaphore {
+    BROWSER_SEMAPHORE.get_or_init(|| Semaphore::new(1))
+}
+
 /// Resolve download URL using headless Chrome for JS-rendered pages.
 pub async fn resolve_with_browser(raw_url: &str) -> Result<ResolvedUrl> {
+    let _permit = browser_semaphore().acquire().await?;
+
     let config = BrowserConfig::builder()
         .no_sandbox()
         .build()
