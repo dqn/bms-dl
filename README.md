@@ -4,11 +4,21 @@ A CLI tool that downloads all BMS files and diffs from a BMS difficulty table UR
 
 ## Installation
 
-Requires [Rust](https://rustup.rs/) and Chromium/Chrome (for JS-rendered pages).
+### Pre-built binaries
+
+Download the latest binary from [GitHub Releases](https://github.com/dqn/bms-dl/releases).
+
+### Build from source
+
+Requires [Rust](https://rustup.rs/).
 
 ```sh
-cargo install --path .
+cargo install --git https://github.com/dqn/bms-dl.git
 ```
+
+### Requirements
+
+[Chromium](https://www.chromium.org/) or [Chrome](https://www.google.com/chrome/) is required at runtime for resolving JS-rendered pages.
 
 ## Usage
 
